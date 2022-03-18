@@ -11,13 +11,13 @@ from torch.autograd import Variable
 import pdb
 import torch.nn.functional as F
 import torchvision.utils as vutils
-import torchvision.transforms as transforms
 import torchvision
 import torch.nn as nn
 import matplotlib.pyplot as plt
 from torchvision.transforms.functional import to_pil_image
 import cv2
 from torchvision.utils import save_image
+import transform
 
 VOC_CLASSES = ["background", "aeroplane", "bicycle", "bird", "boat", "bottle", "bus",
                "car", "cat", "chair", "cow", "diningtable", "dog", "horse",
@@ -28,11 +28,12 @@ VOC_COLORMAP = [[0, 0, 0], [128, 0, 0], [0, 128, 0], [128, 128, 0], [0, 0, 128],
                 [128, 128, 128], [64, 0, 0], [192, 0, 0], [64, 128, 0], [192, 128, 0], [64, 0, 128], [192, 0, 128],
                 [64, 128, 128], [192, 128, 128],[0, 64, 0], [128, 64, 0], [0, 192, 0], [128, 192, 0], [0, 64, 128]]
 
+
 class SegDataset(Dataset):
-    def __init__(self, dataset_dir, crop_size=256, split='train'):
+    def __init__(self, dataset_dir, crop_size=256, split='train', transform=None):
         assert split in ['train', 'trainval', 'val']
         self.dataset_dir = dataset_dir
-        # self.transform = transform
+        self.transform = transform
         self.crop_size = crop_size
         self.list_path = dataset_dir+'ImageSets/Segmentation/{0}.txt'.format(split)
         self.names = []
@@ -44,67 +45,32 @@ class SegDataset(Dataset):
 
     def __getitem__(self, idx):
         input_path = self.dataset_dir+'JPEGImages/{0}.jpg'.format(self.names[idx])
-        target_path = self.dataset_dir+'SegmentationClass/{0}.png'.format(self.names[idx])
+        label_path = self.dataset_dir+'SegmentationClass/{0}.png'.format(self.names[idx])
 
-        input_img = Image.open(input_path).convert('RGB')
-        target_img = np.array(Image.open(target_path).convert('P'))
-        # target_img = self._convert_to_segmentation_mask(target_img)
+        image = cv2.imread(input_path, cv2.IMREAD_COLOR)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)  # convert cv2 read image from BGR order to RGB order
+        image = np.float32(image)
 
-        sample = {
-            'input': self.trans(input_img, target_img)[0],
-            'target': self.trans(input_img, target_img)[1]
-        }
-        return sample
+        label = cv2.imread(label_path, cv2.IMREAD_COLOR)
+        label = cv2.cvtColor(label, cv2.COLOR_BGR2RGB)
+        label = self.process_mask(label, VOC_COLORMAP)
+        label = np.argmax(label, axis=0)
 
-    @staticmethod
-    def _convert_to_segmentation_mask(mask):
-        # https://albumentations.ai/docs/autoalbument/examples/pascal_voc/
-        # AutoAlbument requires a segmentation mask to be a NumPy array with the shape [height, width, num_classes].
-        # Each channel in this mask should encode values for a single class. Pixel in a mask channel should have
-        # a value of 1.0 if the pixel of the image belongs to this class and 0.0 otherwise.
-        height, width = mask.shape[:2]
-        segmentation_mask = np.zeros((height, width, len(VOC_COLORMAP)), dtype=np.float32)
-        for label_index, label in enumerate(VOC_COLORMAP):
-            segmentation_mask[:, :, label_index] = np.all(mask == label, axis=-1).astype(float)
-        return
+        if self.transform is not None:
+            image, label = self.transform(image, label)
+            label[label == 255] = 0
+        return image, label
 
-    def trans(self, input, target):
-        random_seed=np.random.randint(2010147)
-        torch.manual_seed(random_seed)
-        torch.cuda.manual_seed(random_seed)
-        torch.cuda.manual_seed_all(random_seed)  # if use multi-GPU
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-        np.random.seed(random_seed)
-        random.seed(random_seed)
+    def process_mask(self, rgb_mask, colormap):
+        output_mask = []
 
-        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                         std=[0.229, 0.224, 0.225])
-        input_transform = transforms.Compose([transforms.RandomHorizontalFlip(0.5),
-                            transforms.RandomResizedCrop(self.crop_size, scale=(0.5, 2.0)),
-                            transforms.RandomRotation(10),
-                            transforms.GaussianBlur(3),
-                            transforms.ToTensor(),
-                            normalize])
+        for i, color in enumerate(colormap):
+            cmap = np.all(np.equal(rgb_mask, color), axis=-1)
+            cv2.imwrite(f'mask/{i}.png', cmap*255)
+            output_mask.append(cmap)
 
-        target_transform = transforms.Compose([transforms.RandomHorizontalFlip(0.5),
-                                             transforms.RandomResizedCrop(self.crop_size, scale=(0.5, 2.0)),
-                                             transforms.RandomRotation(10),
-                                             transforms.GaussianBlur(3),
-                                             transforms.ToTensor()])
-        input = input_transform(input)
-        target = target_transform(Image.fromarray(target))
-        return input, target
+        return output_mask
 
-    # def validate_image(self, img):
-    #     img = np.array(img, dtype=float)
-    #     if len(img.shape) < 3:
-    #         rgb = np.empty((64, 64, 3), dtype=np.float32)
-    #         rgb[:, :, 0] = img
-    #     #         rgb[:, :, 1] = img
-    #     #         rgb[:, :, 2] = img
-    #         img = rgb
-    #     return img.transpose(2, 0, 1)
 
 class PPM(nn.Module):
     def __init__(self, int_size, in_dim, bins):
@@ -135,7 +101,7 @@ class PSPNet(nn.Module):
         # self.classes = 150 # ADE20K
         self.img_size = img_size
         self.int_size = (img_size[0]//8, img_size[1]//8)
-        self.num_class = 150
+        self.num_class = 21
         self.ppm = PPM(self.int_size, self.dim, (1,2,3,6))
         self.resnet = torchvision.models.resnet50(pretrained=True, replace_stride_with_dilation=[False, True, True])
         self.layer0 = nn.Sequential(
@@ -179,20 +145,71 @@ class PSPNet(nn.Module):
         # torch.Size([b, 2048, h/8, w/8])
         x_aux = self.aux(x_aux) # torch.Size([b, num_class, h/8, w/8])
         x_aux = F.interpolate(x_aux, size=self.img_size, mode='bilinear')
+        # x = torch.argmax(x, dim=1)
+        # x_aux = torch.argmax(x_aux, dim=1)
         return x, x_aux # torch.Size([b, num_class, h, w])
 
-def save_checkpoint(net, dir_path, epoch):
+def save_checkpoint(net, optimizer, scheduler, dir_path):
     path = os.path.abspath(dir_path)
     if not os.path.exists(path):
         os.makedirs(path)
 
-    torch.save(net.state_dict(), '{0}/model_{1}.pth'.format(path, epoch))
+    torch.save(net.state_dict(), '{0}/model.pth'.format(path))
+    torch.save(optimizer.state_dict(), '{0}/optimizer.pth'.format(path))
+    torch.save(scheduler.state_dict(), '{0}/scheduler.pth'.format(path))
 
 def denorm(tensor):
     std = torch.Tensor([0.229, 0.224, 0.225]).reshape(-1, 1, 1)
     mean = torch.Tensor([0.485, 0.456, 0.406]).reshape(-1, 1, 1)
     res = torch.clamp(tensor * std + mean, 0, 1)
     return res
+
+def batch_pix_accuracy(output, target):
+    """Batch Pixel Accuracy
+    Args:
+        predict: input 4D tensor
+        target: label 3D tensor
+    """
+    _, predict = torch.max(output, 1)
+
+    predict = predict.cpu().numpy().astype('int64') + 1
+    target = target.cpu().numpy().astype('int64') + 1
+
+    pixel_labeled = np.sum(target > 0)
+    pixel_correct = np.sum((predict == target) * (target > 0))
+    assert pixel_correct <= pixel_labeled, \
+        "Correct area should be smaller than Labeled"
+    return pixel_correct, pixel_labeled
+
+
+def batch_intersection_union(output, target, nclass):
+    """Batch Intersection of Union
+    Args:
+        predict: input 4D tensor
+        target: label 3D tensor
+        nclass: number of categories (int)
+    """
+    _, predict = torch.max(output, 1)
+    mini = 1
+    maxi = nclass
+    nbins = nclass
+    predict = predict.cpu().numpy().astype('int64') + 1
+    target = target.cpu().numpy().astype('int64') + 1
+
+    predict = predict * (target > 0).astype(predict.dtype)
+    intersection = predict * (predict == target)
+    # areas of intersection and union
+    area_inter, _ = np.histogram(intersection, bins=nbins, range=(mini, maxi))
+    area_pred, _ = np.histogram(predict, bins=nbins, range=(mini, maxi))
+    area_lab, _ = np.histogram(target, bins=nbins, range=(mini, maxi))
+    area_union = area_pred + area_lab - area_inter
+    assert (area_inter <= area_union).all(), \
+        "Intersection area should be smaller than Union area"
+    return area_inter, area_union
+
+def poly_learning_rate(base_lr, iter, max_iter, power):
+    new_lr = base_lr * (1-float(iter) / max_iter) ** power
+    return new_lr
 
 
 # configuration
@@ -202,94 +219,169 @@ dataset_dir = '/home/cvmlserver4/suhyeon/dataset/VOCdevkit/VOC2012/'
 output_dir = './results'
 image_size = 256
 lambda_aux = 0.4
-num_epochs = 200
+num_epochs = 30000
 lr = 1e-2
 power = 0.9
 momentum = 0.9
 weight_decay = 1e-4
-save_model_interval = 50
-test_interval = 10
+save_model_interval = 500
+test_interval = 100
+num_class = 21
+
+value_scale = 255
+mean = [0.485, 0.456, 0.406]
+mean = [item * value_scale for item in mean]
+std = [0.229, 0.224, 0.225]
+std = [item * value_scale for item in std]
 
 # move the input and model to GPU for speed if available
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cuda:2' if torch.cuda.is_available() else 'cpu')
+# device = 'cpu'
 pspnet = PSPNet((image_size, image_size)).to(device)
-optimizer = torch.optim.SGD(pspnet.parameters(), lr=lr,
-            momentum=momentum, weight_decay=weight_decay)
+optimizer = torch.optim.SGD(pspnet.parameters(), lr=lr, weight_decay=weight_decay, momentum=momentum)
+scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer,
+     lr_lambda = lambda step: poly_learning_rate(base_lr=lr, max_iter=num_epochs, iter=0, power=power))
 
-dataset = SegDataset(dataset_dir, crop_size=image_size, split='train')
+train_transform = transform.Compose([
+    transform.RandScale([0.5, 2]),
+    transform.RandRotate([-10, 10], padding=mean, ignore_label=255),
+    transform.RandomGaussianBlur(),
+    transform.RandomHorizontalFlip(),
+    transform.Crop([image_size, image_size], crop_type='rand', padding=mean, ignore_label=255),
+    transform.ToTensor(),
+    transform.Normalize(mean=mean, std=std)])
+
+val_transform = transform.Compose([
+    transform.Crop([image_size, image_size], crop_type='center', padding=mean, ignore_label=255),
+    transform.ToTensor(),
+    transform.Normalize(mean=mean, std=std)])
+
+dataset = SegDataset(dataset_dir, crop_size=image_size, split='train', transform=train_transform)
 dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
 data_iter = iter(dataloader)
-sample = next(data_iter)
+# sample = next(data_iter)
 
-fig = plt.figure()
-ax1 = fig.add_subplot(2, 1, 1)
-ax1.imshow(torchvision.utils.make_grid(sample['input'], normalize=True).permute(1,2,0))
-ax1.set_title('SOURCE')
-ax1.axis("off")
-ax2 = fig.add_subplot(2, 1, 2)
-ax2.imshow(torchvision.utils.make_grid(sample['target']).permute(1,2,0))
-ax2.set_title('SEGMENTATION')
-ax2.axis("off")
-plt.show()
+val_dataset = SegDataset(dataset_dir, crop_size=image_size, split='trainval', transform=train_transform)
+val_dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+val_data_iter = iter(val_dataloader)
 
-val_dataset = SegDataset(dataset_dir, crop_size=image_size, split='trainval')
-rand_idx = np.random.randint(len(val_dataset))
-val_data = val_dataset[rand_idx]
+
+# val_dataset = SegDataset(dataset_dir, crop_size=image_size, split='trainval')
+# rand_idx = np.random.randint(len(val_dataset))
+# val_data = val_dataset[rand_idx]
 
 criterion = nn.CrossEntropyLoss().to(device)
 
-train_loss = []
-ce_loss = []
-aux_loss = []
+torch.cuda.empty_cache()
+train_losses = []; val_losses = []
+train_mIoUs = []; train_pixAccs = []
+val_mIoUs = []; val_pixAccs = []
 
 for epoch in range(num_epochs):
+    # training #
+    total_inter, total_union, total_correct, total_label = 0, 0, 0, 0
+    total_loss, total_mIoU, total_pixAcc = 0, 0, 0
     for i, data in enumerate(dataloader, 0):
-        input = data['input'].to(device)
-        target = data['target'].to(device)
+        input = data[0].to(device)
+        target = data[1].to(device)
         out, aux = pspnet(input)
         loss1 = criterion(out, target)
         loss2 = criterion(aux, target)
-        loss = loss1 + lambda_aux * loss2
-        ce_loss.append(loss1.item())
-        aux_loss.append(loss2.item())
-        train_loss.append(loss.item())
+        train_loss = loss1 + lambda_aux * loss2
+
+        # evaluation metrics
+        correct, labeled = batch_pix_accuracy(out, target)
+        inter, union = batch_intersection_union(out, target, num_class)
+
+        total_correct += correct
+        total_label += labeled
+        total_inter += inter
+        total_union += union
+        train_pixAcc = 1.0 * total_correct / (np.spacing(1) + total_label)
+        IoU = 1.0 * total_inter / (np.spacing(1) + total_union)
+        train_mIoU = IoU.mean()
+
+        total_loss += train_loss.item()
+        total_pixAcc += train_pixAcc.item()
+        total_mIoU += train_mIoU.item()
 
         optimizer.zero_grad()
-        loss.backward()
+        train_loss.backward()
         optimizer.step()
+        scheduler.step()
 
-        if epoch % test_interval == 0:
-            print('[%d/%d][%d/%d]\tLoss_CE: %.4f\tLoss_AUX: %.4f\tloss_Train: %.4f'
-                  # 'D(G(z)): %.4f / %.4f'
-                  % (epoch, num_epochs, i, len(dataloader),
-                     ce_loss[-1], aux_loss[-1], loss[-1]))
+    train_losses.append(total_loss / len(dataloader))
+    train_pixAccs.append(total_pixAcc / len(dataloader))
+    train_mIoUs.append(total_mIoU / len(dataloader))
 
-        if (epoch + 1) % save_model_interval == 0 or epoch == num_epochs - 1:
-            save_checkpoint(pspnet, epoch + 1)
+    # validation #
+    # if (epoch + 1) % test_interval == 0 or epoch == num_epochs - 1:
+    pspnet.eval()
+    total_inter, total_union, total_correct, total_label = 0, 0, 0, 0
+    total_loss, total_mIoU, total_pixAcc = 0, 0, 0
+    for i, data in enumerate(dataloader, 0):
+        with torch.no_grad():
+            val_input = data[0].to(device)
+            val_target = data[1].to(device)
 
-        if (epoch + 1) % test_interval == 0 or epoch == num_epochs - 1:
-            with torch.no_grad():
-                val_out, _ = pspnet(val_data['input'].to(device))
-                val_tgt = val_data['target']
-                output = torch.cat((val_out, val_tgt), dim=0)
-                output = denorm(output.cpu())
-                output_name = os.path.abspath(output_dir) + '/output_epoch_{:0}.jpg'.format(epoch)
-                save_image(output, str(output_name))
+            val_out, _ = pspnet(val_input)
+            val_loss = criterion(val_out, val_target)
 
-        plt.figure(figsize=(10, 5))
-        plt.title("Generator and Discriminator Loss During Training")
-        plt.plot(ce_loss, label="CE")
-        plt.plot(aux_loss, label="AUX")
-        plt.plot(train_loss, label="TRAIN")
-        plt.xlabel("iterations")
-        plt.ylabel("Loss")
-        plt.legend()
-        # plt.show()
-        fig_name = os.path.abspath(output_dir) + '/plot_epoch_{:0}.jpg'.format(epoch)
-        plt.savefig(fig_name)
+            correct, labeled = batch_pix_accuracy(val_out, val_target)
+            inter, union = batch_intersection_union(val_out, val_target, num_class)
 
-        # # Tensor of shape 1000, with confidence scores over Imagenet's 1000 classes
-        # print(output.shape)
-        # The output has unnormalized scores. To get probabilities, you can run a softmax on it.
-        # probabilities = torch.nn.functional.softmax(output[0], dim=0)
-        # print(probabilities)
+            total_correct += correct
+            total_label += labeled
+            total_inter += inter
+            total_union += union
+            val_pixAcc = 1.0 * total_correct / (np.spacing(1) + total_label)
+            val_IoU = 1.0 * total_inter / (np.spacing(1) + total_union)
+            val_mIoU = val_IoU.mean()
+
+            total_loss += val_loss.item()
+            total_pixAcc += val_pixAcc.item()
+            total_mIoU += val_mIoU.item()
+
+    val_losses.append(total_loss / len(val_dataloader))
+    val_pixAccs.append(total_pixAcc / len(val_dataloader))
+    val_mIoUs.append(total_mIoU / len(val_dataloader))
+
+    # if epoch % test_interval == 0:
+    print('[%d/%d][%d]\tLoss_Train: %.4f\tLoss_Val: %.4f'
+          '\tmIoU_Train: %.4f''\tmIoU_Val: %.4f''\tAcc_Train: %.4f\tAcc_Val: %.4f'
+          % (epoch, num_epochs, len(dataloader),
+             train_losses[-1], val_losses[-1],
+             train_mIoUs[-1], val_mIoUs[-1],
+             train_pixAccs[-1], val_pixAccs[-1]))
+
+    if (epoch + 1) % save_model_interval == 0 or epoch == num_epochs - 1:
+        save_checkpoint(pspnet, optimizer, scheduler, 'checkpoints')
+
+    fig = plt.figure()
+    ax1 = fig.add_subplot(3, 1, 1)
+    ax1.plot(val_losses, label='val')
+    ax1.plot(train_losses, label='train')
+    ax1.set_xlabel("Epoch")
+    ax1.set_ylabel("Loss")
+    ax1.legend(), ax1.grid()
+    ax1.set_title('Loss')
+
+    ax2 = fig.add_subplot(3, 1, 2)
+    ax2.plot(val_mIoUs, label='val')
+    ax2.plot(train_mIoUs, label='train')
+    ax2.set_xlabel("Epoch")
+    ax2.set_ylabel("mIoU")
+    ax2.legend(), ax2.grid()
+    ax2.set_title('Score per epoch')
+
+    ax3 = fig.add_subplot(3, 1, 3)
+    ax3.plot(val_pixAccs, label='val')
+    ax3.plot(train_pixAccs, label='train')
+    ax3.set_xlabel("Epoch")
+    ax3.set_ylabel("Accuracy")
+    ax3.legend(), ax3.grid()
+    ax3.set_title('Accuracy per epoch')
+
+    # plt.show()
+    fig_name = os.path.abspath(output_dir) + '/plot_epoch_{:0}.jpg'.format(epoch)
+    plt.savefig(fig_name)
