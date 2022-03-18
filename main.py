@@ -360,7 +360,8 @@ class Tester(object):
     def __init__(self):
         epoch = 500
         val_transform = transform.Compose([
-            transform.Crop([image_size, image_size], crop_type='center', padding=mean, ignore_label=255),
+            # transform.Crop([image_size, image_size], crop_type='center', padding=mean, ignore_label=255),
+            transform.Resize([image_size, image_size]),
             transform.ToTensor(),
             transform.Normalize(mean=mean, std=std)])
 
@@ -417,7 +418,7 @@ class Tester(object):
         pixAccs.append(total_pixAcc / len(dataloader))
         mIoUs.append(total_mIoU / len(dataloader))
 
-        print('[%d][%d]\tLoss_Val: %.4f''\tmIoU_Val: %.4f''\tAcc_Val: %.4f'
+        print('[%d][%d]\tLoss_test: %.4f''\tmIoU_test: %.4f''\tAcc_test: %.4f'
               % (epoch, len(dataloader),
                  losses[-1], mIoUs[-1], pixAccs[-1]))
 
