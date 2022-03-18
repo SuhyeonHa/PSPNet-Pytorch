@@ -211,9 +211,218 @@ def poly_learning_rate(base_lr, iter, max_iter, power):
     new_lr = base_lr * (1-float(iter) / max_iter) ** power
     return new_lr
 
+class Trainer(object):
+    def __init__(self):
+        train_transform = transform.Compose([
+            transform.RandScale([0.5, 2]),
+            transform.RandRotate([-10, 10], padding=mean, ignore_label=255),
+            transform.RandomGaussianBlur(),
+            transform.RandomHorizontalFlip(),
+            transform.Crop([image_size, image_size], crop_type='rand', padding=mean, ignore_label=255),
+            transform.ToTensor(),
+            transform.Normalize(mean=mean, std=std)])
+
+        val_transform = transform.Compose([
+            transform.Crop([image_size, image_size], crop_type='center', padding=mean, ignore_label=255),
+            transform.ToTensor(),
+            transform.Normalize(mean=mean, std=std)])
+
+        dataset = SegDataset(dataset_dir, crop_size=image_size, split='train', transform=train_transform)
+        dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
+        data_iter = iter(dataloader)
+        # sample = next(data_iter)
+
+        val_dataset = SegDataset(dataset_dir, crop_size=image_size, split='trainval', transform=val_transform)
+        val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+        val_data_iter = iter(val_dataloader)
+
+        # val_dataset = SegDataset(dataset_dir, crop_size=image_size, split='trainval')
+        # rand_idx = np.random.randint(len(val_dataset))
+        # val_data = val_dataset[rand_idx]
+
+        criterion = nn.CrossEntropyLoss().to(device)
+
+        torch.cuda.empty_cache()
+        train_losses = []; val_losses = []
+        train_mIoUs = []; train_pixAccs = []
+        val_mIoUs = []; val_pixAccs = []
+
+        for epoch in range(num_epochs):
+            # training #
+            total_inter, total_union, total_correct, total_label = 0, 0, 0, 0
+            total_loss, total_mIoU, total_pixAcc = 0, 0, 0
+            for i, data in enumerate(dataloader, 0):
+                input = data[0].to(device)
+                target = data[1].to(device)
+                out, aux = pspnet(input)
+                loss1 = criterion(out, target)
+                loss2 = criterion(aux, target)
+                train_loss = loss1 + lambda_aux * loss2
+
+                # evaluation metrics
+                correct, labeled = batch_pix_accuracy(out, target)
+                inter, union = batch_intersection_union(out, target, num_class)
+
+                total_correct += correct
+                total_label += labeled
+                total_inter += inter
+                total_union += union
+                train_pixAcc = 1.0 * total_correct / (np.spacing(1) + total_label)
+                IoU = 1.0 * total_inter / (np.spacing(1) + total_union)
+                train_mIoU = IoU.mean()
+
+                total_loss += train_loss.item()
+                total_pixAcc += train_pixAcc.item()
+                total_mIoU += train_mIoU.item()
+
+                optimizer.zero_grad()
+                train_loss.backward()
+                optimizer.step()
+                scheduler.step()
+
+            train_losses.append(total_loss / len(dataloader))
+            train_pixAccs.append(total_pixAcc / len(dataloader))
+            train_mIoUs.append(total_mIoU / len(dataloader))
+
+            # validation #
+            # if (epoch + 1) % test_interval == 0 or epoch == num_epochs - 1:
+            pspnet.eval()
+            total_inter, total_union, total_correct, total_label = 0, 0, 0, 0
+            total_loss, total_mIoU, total_pixAcc = 0, 0, 0
+            for i, data in enumerate(dataloader, 0):
+                with torch.no_grad():
+                    val_input = data[0].to(device)
+                    val_target = data[1].to(device)
+
+                    val_out, _ = pspnet(val_input)
+                    val_loss = criterion(val_out, val_target)
+
+                    correct, labeled = batch_pix_accuracy(val_out, val_target)
+                    inter, union = batch_intersection_union(val_out, val_target, num_class)
+
+                    total_correct += correct
+                    total_label += labeled
+                    total_inter += inter
+                    total_union += union
+                    val_pixAcc = 1.0 * total_correct / (np.spacing(1) + total_label)
+                    val_IoU = 1.0 * total_inter / (np.spacing(1) + total_union)
+                    val_mIoU = val_IoU.mean()
+
+                    total_loss += val_loss.item()
+                    total_pixAcc += val_pixAcc.item()
+                    total_mIoU += val_mIoU.item()
+
+            val_losses.append(total_loss / len(val_dataloader))
+            val_pixAccs.append(total_pixAcc / len(val_dataloader))
+            val_mIoUs.append(total_mIoU / len(val_dataloader))
+
+            # if epoch % test_interval == 0:
+            print('[%d/%d][%d]\tLoss_Train: %.4f\tLoss_Val: %.4f'
+                  '\tmIoU_Train: %.4f''\tmIoU_Val: %.4f''\tAcc_Train: %.4f\tAcc_Val: %.4f'
+                  % (epoch, num_epochs, len(dataloader),
+                     train_losses[-1], val_losses[-1],
+                     train_mIoUs[-1], val_mIoUs[-1],
+                     train_pixAccs[-1], val_pixAccs[-1]))
+
+            if (epoch + 1) % save_model_interval == 0 or epoch == num_epochs - 1:
+                save_checkpoint(pspnet, optimizer, scheduler, 'checkpoints')
+
+            fig = plt.figure()
+            ax1 = fig.add_subplot(3, 1, 1)
+            ax1.plot(val_losses, label='val')
+            ax1.plot(train_losses, label='train')
+            ax1.set_xlabel("Epoch")
+            ax1.set_ylabel("Loss")
+            ax1.legend(), ax1.grid()
+            ax1.set_title('Loss')
+
+            ax2 = fig.add_subplot(3, 1, 2)
+            ax2.plot(val_mIoUs, label='val')
+            ax2.plot(train_mIoUs, label='train')
+            ax2.set_xlabel("Epoch")
+            ax2.set_ylabel("mIoU")
+            ax2.legend(), ax2.grid()
+            ax2.set_title('Score per epoch')
+
+            ax3 = fig.add_subplot(3, 1, 3)
+            ax3.plot(val_pixAccs, label='val')
+            ax3.plot(train_pixAccs, label='train')
+            ax3.set_xlabel("Epoch")
+            ax3.set_ylabel("Accuracy")
+            ax3.legend(), ax3.grid()
+            ax3.set_title('Accuracy per epoch')
+
+            # plt.show()
+            fig_name = os.path.abspath(output_dir) + '/plot_epoch_{:0}.jpg'.format(epoch)
+            plt.savefig(fig_name)
+
+class Tester(object):
+    def __init__(self):
+        epoch = 500
+        val_transform = transform.Compose([
+            transform.Crop([image_size, image_size], crop_type='center', padding=mean, ignore_label=255),
+            transform.ToTensor(),
+            transform.Normalize(mean=mean, std=std)])
+
+        criterion = nn.CrossEntropyLoss().to(device)
+
+        torch.cuda.empty_cache()
+        losses = []
+        mIoUs = []
+        pixAccs = []
+
+        dataset = SegDataset(dataset_dir, crop_size=image_size, split='val', transform=val_transform)
+        dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+
+        pspnet.load_state_dict(torch.load('./checkpoints/'+'model.pth'))
+        optimizer.load_state_dict(torch.load('./checkpoints/'+'optimizer.pth'))
+
+        pspnet.eval()
+        total_inter, total_union, total_correct, total_label = 0, 0, 0, 0
+        total_loss, total_mIoU, total_pixAcc = 0, 0, 0
+        for i, data in enumerate(dataloader, 0):
+            with torch.no_grad():
+                input = data[0].to(device)
+                target = data[1].to(device)
+
+                val_out, _ = pspnet(input)
+                val_loss = criterion(val_out, target)
+
+                correct, labeled = batch_pix_accuracy(val_out, target)
+                inter, union = batch_intersection_union(val_out, target, num_class)
+
+                total_correct += correct
+                total_label += labeled
+                total_inter += inter
+                total_union += union
+                val_pixAcc = 1.0 * total_correct / (np.spacing(1) + total_label)
+                val_IoU = 1.0 * total_inter / (np.spacing(1) + total_union)
+                val_mIoU = val_IoU.mean()
+
+                total_loss += val_loss.item()
+                total_pixAcc += val_pixAcc.item()
+                total_mIoU += val_mIoU.item()
+
+                # image save
+                pred = val_out.squeeze().argmax(dim=0).cpu()
+                gray = np.uint8(pred)
+                color = Image.fromarray(gray.astype(np.uint8)).convert('P')
+                color.putpalette(np.array(VOC_COLORMAP).astype('uint8'))
+                # gray_path = os.path.join('./results/testset/' + '{0}_gray.png').format(i)
+                color_path = os.path.join('./results/testset/' + '{0}_seg.png').format(i)
+                # cv2.imwrite(gray_path, gray)
+                color.save(color_path)
+
+        losses.append(total_loss / len(dataloader))
+        pixAccs.append(total_pixAcc / len(dataloader))
+        mIoUs.append(total_mIoU / len(dataloader))
+
+        print('[%d][%d]\tLoss_Val: %.4f''\tmIoU_Val: %.4f''\tAcc_Val: %.4f'
+              % (epoch, len(dataloader),
+                 losses[-1], mIoUs[-1], pixAccs[-1]))
 
 # configuration
-batch_size = 8
+batch_size = 1
 num_workers = 0
 dataset_dir = '/home/cvmlserver4/suhyeon/dataset/VOCdevkit/VOC2012/'
 output_dir = './results'
@@ -242,146 +451,5 @@ optimizer = torch.optim.SGD(pspnet.parameters(), lr=lr, weight_decay=weight_deca
 scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer,
      lr_lambda = lambda step: poly_learning_rate(base_lr=lr, max_iter=num_epochs, iter=0, power=power))
 
-train_transform = transform.Compose([
-    transform.RandScale([0.5, 2]),
-    transform.RandRotate([-10, 10], padding=mean, ignore_label=255),
-    transform.RandomGaussianBlur(),
-    transform.RandomHorizontalFlip(),
-    transform.Crop([image_size, image_size], crop_type='rand', padding=mean, ignore_label=255),
-    transform.ToTensor(),
-    transform.Normalize(mean=mean, std=std)])
+tester = Tester()
 
-val_transform = transform.Compose([
-    transform.Crop([image_size, image_size], crop_type='center', padding=mean, ignore_label=255),
-    transform.ToTensor(),
-    transform.Normalize(mean=mean, std=std)])
-
-dataset = SegDataset(dataset_dir, crop_size=image_size, split='train', transform=train_transform)
-dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
-data_iter = iter(dataloader)
-# sample = next(data_iter)
-
-val_dataset = SegDataset(dataset_dir, crop_size=image_size, split='trainval', transform=train_transform)
-val_dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
-val_data_iter = iter(val_dataloader)
-
-
-# val_dataset = SegDataset(dataset_dir, crop_size=image_size, split='trainval')
-# rand_idx = np.random.randint(len(val_dataset))
-# val_data = val_dataset[rand_idx]
-
-criterion = nn.CrossEntropyLoss().to(device)
-
-torch.cuda.empty_cache()
-train_losses = []; val_losses = []
-train_mIoUs = []; train_pixAccs = []
-val_mIoUs = []; val_pixAccs = []
-
-for epoch in range(num_epochs):
-    # training #
-    total_inter, total_union, total_correct, total_label = 0, 0, 0, 0
-    total_loss, total_mIoU, total_pixAcc = 0, 0, 0
-    for i, data in enumerate(dataloader, 0):
-        input = data[0].to(device)
-        target = data[1].to(device)
-        out, aux = pspnet(input)
-        loss1 = criterion(out, target)
-        loss2 = criterion(aux, target)
-        train_loss = loss1 + lambda_aux * loss2
-
-        # evaluation metrics
-        correct, labeled = batch_pix_accuracy(out, target)
-        inter, union = batch_intersection_union(out, target, num_class)
-
-        total_correct += correct
-        total_label += labeled
-        total_inter += inter
-        total_union += union
-        train_pixAcc = 1.0 * total_correct / (np.spacing(1) + total_label)
-        IoU = 1.0 * total_inter / (np.spacing(1) + total_union)
-        train_mIoU = IoU.mean()
-
-        total_loss += train_loss.item()
-        total_pixAcc += train_pixAcc.item()
-        total_mIoU += train_mIoU.item()
-
-        optimizer.zero_grad()
-        train_loss.backward()
-        optimizer.step()
-        scheduler.step()
-
-    train_losses.append(total_loss / len(dataloader))
-    train_pixAccs.append(total_pixAcc / len(dataloader))
-    train_mIoUs.append(total_mIoU / len(dataloader))
-
-    # validation #
-    # if (epoch + 1) % test_interval == 0 or epoch == num_epochs - 1:
-    pspnet.eval()
-    total_inter, total_union, total_correct, total_label = 0, 0, 0, 0
-    total_loss, total_mIoU, total_pixAcc = 0, 0, 0
-    for i, data in enumerate(dataloader, 0):
-        with torch.no_grad():
-            val_input = data[0].to(device)
-            val_target = data[1].to(device)
-
-            val_out, _ = pspnet(val_input)
-            val_loss = criterion(val_out, val_target)
-
-            correct, labeled = batch_pix_accuracy(val_out, val_target)
-            inter, union = batch_intersection_union(val_out, val_target, num_class)
-
-            total_correct += correct
-            total_label += labeled
-            total_inter += inter
-            total_union += union
-            val_pixAcc = 1.0 * total_correct / (np.spacing(1) + total_label)
-            val_IoU = 1.0 * total_inter / (np.spacing(1) + total_union)
-            val_mIoU = val_IoU.mean()
-
-            total_loss += val_loss.item()
-            total_pixAcc += val_pixAcc.item()
-            total_mIoU += val_mIoU.item()
-
-    val_losses.append(total_loss / len(val_dataloader))
-    val_pixAccs.append(total_pixAcc / len(val_dataloader))
-    val_mIoUs.append(total_mIoU / len(val_dataloader))
-
-    # if epoch % test_interval == 0:
-    print('[%d/%d][%d]\tLoss_Train: %.4f\tLoss_Val: %.4f'
-          '\tmIoU_Train: %.4f''\tmIoU_Val: %.4f''\tAcc_Train: %.4f\tAcc_Val: %.4f'
-          % (epoch, num_epochs, len(dataloader),
-             train_losses[-1], val_losses[-1],
-             train_mIoUs[-1], val_mIoUs[-1],
-             train_pixAccs[-1], val_pixAccs[-1]))
-
-    if (epoch + 1) % save_model_interval == 0 or epoch == num_epochs - 1:
-        save_checkpoint(pspnet, optimizer, scheduler, 'checkpoints')
-
-    fig = plt.figure()
-    ax1 = fig.add_subplot(3, 1, 1)
-    ax1.plot(val_losses, label='val')
-    ax1.plot(train_losses, label='train')
-    ax1.set_xlabel("Epoch")
-    ax1.set_ylabel("Loss")
-    ax1.legend(), ax1.grid()
-    ax1.set_title('Loss')
-
-    ax2 = fig.add_subplot(3, 1, 2)
-    ax2.plot(val_mIoUs, label='val')
-    ax2.plot(train_mIoUs, label='train')
-    ax2.set_xlabel("Epoch")
-    ax2.set_ylabel("mIoU")
-    ax2.legend(), ax2.grid()
-    ax2.set_title('Score per epoch')
-
-    ax3 = fig.add_subplot(3, 1, 3)
-    ax3.plot(val_pixAccs, label='val')
-    ax3.plot(train_pixAccs, label='train')
-    ax3.set_xlabel("Epoch")
-    ax3.set_ylabel("Accuracy")
-    ax3.legend(), ax3.grid()
-    ax3.set_title('Accuracy per epoch')
-
-    # plt.show()
-    fig_name = os.path.abspath(output_dir) + '/plot_epoch_{:0}.jpg'.format(epoch)
-    plt.savefig(fig_name)
