@@ -4,7 +4,7 @@ Pyramid Scene Parsing Network CVPR 2018 Implementation
 <img src="images/network.png" height="200"></img>
 
 ## Example Results
-<img src="images/d_results.png" height="200"></img>
+<img src="images/d_results.png" height="300"></img>
 
 ## Usage
 ### Prerequisites
