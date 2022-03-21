@@ -1,23 +1,15 @@
 import os
-import io
-import random
-
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 import numpy as np
-import pdb
 from PIL import Image
 import torch
-from torch.autograd import Variable
-import pdb
 import torch.nn.functional as F
-import torchvision.utils as vutils
 import torchvision
 import torch.nn as nn
 import matplotlib.pyplot as plt
-from torchvision.transforms.functional import to_pil_image
 import cv2
-from torchvision.utils import save_image
 import transform
+import argparse
 
 VOC_CLASSES = ["background", "aeroplane", "bicycle", "bird", "boat", "bottle", "bus",
                "car", "cat", "chair", "cow", "diningtable", "dog", "horse",
@@ -229,16 +221,9 @@ class Trainer(object):
 
         dataset = SegDataset(dataset_dir, crop_size=image_size, split='train', transform=train_transform)
         dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
-        data_iter = iter(dataloader)
-        # sample = next(data_iter)
 
         val_dataset = SegDataset(dataset_dir, crop_size=image_size, split='trainval', transform=val_transform)
         val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
-        val_data_iter = iter(val_dataloader)
-
-        # val_dataset = SegDataset(dataset_dir, crop_size=image_size, split='trainval')
-        # rand_idx = np.random.randint(len(val_dataset))
-        # val_data = val_dataset[rand_idx]
 
         criterion = nn.CrossEntropyLoss().to(device)
 
@@ -372,7 +357,7 @@ class Tester(object):
         mIoUs = []
         pixAccs = []
 
-        dataset = SegDataset(dataset_dir, crop_size=image_size, split='val', transform=val_transform)
+        dataset = SegDataset(dataset_dir, crop_size=image_size, split='trainval', transform=val_transform)
         dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
         pspnet.load_state_dict(torch.load('./checkpoints/'+'model.pth'))
@@ -410,7 +395,7 @@ class Tester(object):
                 color = Image.fromarray(gray.astype(np.uint8)).convert('P')
                 color.putpalette(np.array(VOC_COLORMAP).astype('uint8'))
                 # gray_path = os.path.join('./results/testset/' + '{0}_gray.png').format(i)
-                color_path = os.path.join('./results/testset/' + '{0}_seg.png').format(i)
+                color_path = os.path.join('./results/trainvalset/' + '{0}_seg.png').format(i)
                 # cv2.imwrite(gray_path, gray)
                 color.save(color_path)
 
@@ -418,39 +403,51 @@ class Tester(object):
         pixAccs.append(total_pixAcc / len(dataloader))
         mIoUs.append(total_mIoU / len(dataloader))
 
-        print('[%d][%d]\tLoss_test: %.4f''\tmIoU_test: %.4f''\tAcc_test: %.4f'
+        print('[%d][%d]\tLoss_trainval: %.4f''\tmIoU_trainval: %.4f''\tAcc_trainval: %.4f'
               % (epoch, len(dataloader),
                  losses[-1], mIoUs[-1], pixAccs[-1]))
 
-# configuration
-batch_size = 1
-num_workers = 0
-dataset_dir = '/home/cvmlserver4/suhyeon/dataset/VOCdevkit/VOC2012/'
-output_dir = './results'
-image_size = 256
-lambda_aux = 0.4
-num_epochs = 30000
-lr = 1e-2
-power = 0.9
-momentum = 0.9
-weight_decay = 1e-4
-save_model_interval = 500
-test_interval = 100
-num_class = 21
+def get_args_parser():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--isTraining', type=str, required=True, help='True for training, False for testing')
+    return parser
 
-value_scale = 255
-mean = [0.485, 0.456, 0.406]
-mean = [item * value_scale for item in mean]
-std = [0.229, 0.224, 0.225]
-std = [item * value_scale for item in std]
+if __name__== '__main__':
+    args = get_args_parser().parse_args()
 
-# move the input and model to GPU for speed if available
-device = torch.device('cuda:2' if torch.cuda.is_available() else 'cpu')
-# device = 'cpu'
-pspnet = PSPNet((image_size, image_size)).to(device)
-optimizer = torch.optim.SGD(pspnet.parameters(), lr=lr, weight_decay=weight_decay, momentum=momentum)
-scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer,
-     lr_lambda = lambda step: poly_learning_rate(base_lr=lr, max_iter=num_epochs, iter=0, power=power))
+    # configuration
+    batch_size = 1
+    num_workers = 0
+    dataset_dir = '/home/cvmlserver4/suhyeon/dataset/VOCdevkit/VOC2012/'
+    output_dir = './results'
+    image_size = 256
+    lambda_aux = 0.4
+    num_epochs = 30000
+    lr = 1e-2
+    power = 0.9
+    momentum = 0.9
+    weight_decay = 1e-4
+    save_model_interval = 500
+    test_interval = 100
+    num_class = 21
 
-tester = Tester()
+    value_scale = 255
+    mean = [0.485, 0.456, 0.406]
+    mean = [item * value_scale for item in mean]
+    std = [0.229, 0.224, 0.225]
+    std = [item * value_scale for item in std]
+
+    # move the input and model to GPU for speed if available
+    device = torch.device('cuda:2' if torch.cuda.is_available() else 'cpu')
+    # device = 'cpu'
+    pspnet = PSPNet((image_size, image_size)).to(device)
+    optimizer = torch.optim.SGD(pspnet.parameters(), lr=lr, weight_decay=weight_decay, momentum=momentum)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer,
+                                                  lr_lambda=lambda step: poly_learning_rate(base_lr=lr,
+                                                                                            max_iter=num_epochs, iter=0,
+                                                                                            power=power))
+    if args.isTraining == True:
+        trainer = Trainer()
+    else:
+        tester = Tester()
 
