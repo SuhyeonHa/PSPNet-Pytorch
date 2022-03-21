@@ -24,13 +24,13 @@ cd PSPNet-Pytorch
 
 #### Model Training
 ```bash
-train.py --isTraining True
+main.py --isTraining True
 ```
 Please check configuration part first in '__main__' of main.py for adjusting dicterory paths and batch size etc..
 
 #### Use a Pre-trained Model
 - Download a Pre-trained generator [here](https://drive.google.com/file/d/1B9YjJE6qF57Gyj75VlXcUBl_8y4YcqZm/view?usp=sharing)
 ```bash
-test.py --isTraining False
+main.py --isTraining False
 ```
 
